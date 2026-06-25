@@ -14,10 +14,12 @@ export const Route = createFileRoute("/")({
 });
 
 type Vec = { x: number; y: number };
-type Bullet = Vec & { vy: number; from: "player" | "enemy" };
+type Bullet = Vec & { vx?: number; vy: number; from: "player" | "enemy" };
 type Enemy = Vec & { vx: number; vy: number; hp: number; r: number; cooldown: number };
 type Particle = Vec & { vx: number; vy: number; life: number; max: number; color: string };
 type Star = { x: number; y: number; z: number };
+type PowerKind = "rapid" | "shield" | "triple";
+type PowerUp = Vec & { vy: number; kind: PowerKind; spin: number };
 
 function Index() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -25,6 +27,7 @@ function Index() {
   const [lives, setLives] = useState(3);
   const [gameOver, setGameOver] = useState(false);
   const [started, setStarted] = useState(false);
+  const [power, setPower] = useState({ rapid: 0, shield: 0, triple: 0 });
   const resetKey = useRef(0);
 
   useEffect(() => {
@@ -40,6 +43,9 @@ function Index() {
     let bullets: Bullet[] = [];
     let enemies: Enemy[] = [];
     let particles: Particle[] = [];
+    let powerups: PowerUp[] = [];
+    const buff = { rapid: 0, shield: 0, triple: 0 };
+    const pushBuff = () => setPower({ ...buff });
     const stars: Star[] = Array.from({ length: 140 }, () => ({
       x: Math.random() * W,
       y: Math.random() * H,
@@ -107,6 +113,13 @@ function Index() {
       }
     };
 
+    const powerColors: Record<PowerKind, string> = {
+      rapid: "#fbbf24",
+      shield: "#7dd3fc",
+      triple: "#a78bfa",
+    };
+    const powerLabels: Record<PowerKind, string> = { rapid: "R", shield: "S", triple: "T" };
+
     let raf = 0;
     const loop = () => {
       frame++;
@@ -155,9 +168,15 @@ function Index() {
       player.cooldown--;
       const firing = keys.has(" ") || keys.has("z") || pointer.fire;
       if (firing && player.cooldown <= 0) {
-        bullets.push({ x: player.x - 6 * scale, y: player.y - player.r, vy: -10 * scale, from: "player" });
-        bullets.push({ x: player.x + 6 * scale, y: player.y - player.r, vy: -10 * scale, from: "player" });
-        player.cooldown = 8;
+        const vy = -10 * scale;
+        bullets.push({ x: player.x - 6 * scale, y: player.y - player.r, vy, from: "player" });
+        bullets.push({ x: player.x + 6 * scale, y: player.y - player.r, vy, from: "player" });
+        if (buff.triple > 0) {
+          bullets.push({ x: player.x, y: player.y - player.r, vy, from: "player" });
+          bullets.push({ x: player.x - 12 * scale, y: player.y, vx: -2 * scale, vy: -9 * scale, from: "player" });
+          bullets.push({ x: player.x + 12 * scale, y: player.y, vx: 2 * scale, vy: -9 * scale, from: "player" });
+        }
+        player.cooldown = buff.rapid > 0 ? 3 : 8;
       }
 
       // spawn
@@ -168,10 +187,17 @@ function Index() {
         spawnTimer = Math.max(20, 60 - frame / 200);
       }
 
+      // buff timers
+      if (buff.rapid > 0) buff.rapid--;
+      if (buff.shield > 0) buff.shield--;
+      if (buff.triple > 0) buff.triple--;
+      if (frame % 15 === 0) pushBuff();
+
       // update bullets
       bullets = bullets.filter((b) => {
+        if (b.vx) b.x += b.vx;
         b.y += b.vy;
-        return b.y > -20 && b.y < H + 20;
+        return b.y > -20 && b.y < H + 20 && b.x > -20 && b.x < W + 20;
       });
 
       // update enemies
@@ -199,6 +225,11 @@ function Index() {
               e.y = H + 999;
               curScore += 10;
               setScore(curScore);
+              if (Math.random() < 0.18) {
+                const kinds: PowerKind[] = ["rapid", "shield", "triple"];
+                const kind = kinds[Math.floor(Math.random() * kinds.length)];
+                powerups.push({ x: e.x, y: e.y, vy: 1.5 * scale, kind, spin: 0 });
+              }
             }
             break;
           }
@@ -209,10 +240,20 @@ function Index() {
 
       // enemy bullets vs player & enemy bodies vs player
       const hit = (x: number, y: number, r: number) =>
-        player.invuln <= 0 && Math.hypot(x - player.x, y - player.y) < r + player.r * 0.7;
+        player.invuln <= 0 &&
+        buff.shield <= 0 &&
+        Math.hypot(x - player.x, y - player.y) < r + player.r * 0.7;
+      const shieldBlock = (x: number, y: number, r: number) =>
+        buff.shield > 0 && Math.hypot(x - player.x, y - player.y) < r + player.r * 1.3;
 
       for (const b of bullets) {
-        if (b.from === "enemy" && hit(b.x, b.y, 4 * scale)) {
+        if (b.from !== "enemy") continue;
+        if (shieldBlock(b.x, b.y, 4 * scale)) {
+          b.y = H + 999;
+          burst(b.x, b.y, "#7dd3fc", 8);
+          continue;
+        }
+        if (hit(b.x, b.y, 4 * scale)) {
           b.y = H + 999;
           curLives--;
           setLives(curLives);
@@ -221,6 +262,13 @@ function Index() {
         }
       }
       for (const e of enemies) {
+        if (shieldBlock(e.x, e.y, e.r)) {
+          burst(e.x, e.y, "#7dd3fc", 18);
+          e.hp = 0;
+          curScore += 5;
+          setScore(curScore);
+          continue;
+        }
         if (hit(e.x, e.y, e.r)) {
           curLives--;
           setLives(curLives);
@@ -231,6 +279,46 @@ function Index() {
       }
       enemies = enemies.filter((e) => e.hp > 0);
       bullets = bullets.filter((b) => b.y < H + 20);
+
+      // update + collect power-ups
+      powerups = powerups.filter((p) => {
+        p.y += p.vy;
+        p.spin += 0.08;
+        if (Math.hypot(p.x - player.x, p.y - player.y) < player.r + 14 * scale) {
+          if (p.kind === "rapid") buff.rapid = 360;
+          else if (p.kind === "shield") buff.shield = 360;
+          else buff.triple = 360;
+          pushBuff();
+          burst(p.x, p.y, powerColors[p.kind], 20);
+          return false;
+        }
+        return p.y < H + 30;
+      });
+
+      // draw power-ups
+      for (const p of powerups) {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        const c = powerColors[p.kind];
+        ctx.shadowColor = c;
+        ctx.shadowBlur = 16;
+        ctx.rotate(p.spin);
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.beginPath();
+        ctx.arc(0, 0, 14 * scale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = 2 * scale;
+        ctx.strokeStyle = c;
+        ctx.stroke();
+        ctx.rotate(-p.spin);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = c;
+        ctx.font = `bold ${14 * scale}px ui-monospace, monospace`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(powerLabels[p.kind], 0, 1 * scale);
+        ctx.restore();
+      }
 
       // particles
       particles = particles.filter((p) => {
@@ -298,6 +386,21 @@ function Index() {
         ctx.restore();
       }
 
+      // shield ring
+      if (buff.shield > 0) {
+        ctx.save();
+        ctx.translate(player.x, player.y);
+        const a = 0.5 + 0.3 * Math.sin(frame * 0.2);
+        ctx.strokeStyle = `rgba(125,211,252,${a})`;
+        ctx.lineWidth = 2 * scale;
+        ctx.shadowColor = "#38bdf8";
+        ctx.shadowBlur = 14;
+        ctx.beginPath();
+        ctx.arc(0, 0, player.r * 1.6, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       if (curLives <= 0 && !over) {
         over = true;
         setGameOver(true);
@@ -321,6 +424,7 @@ function Index() {
     resetKey.current++;
     setScore(0);
     setLives(3);
+    setPower({ rapid: 0, shield: 0, triple: 0 });
     setGameOver(false);
     setStarted(true);
   };
@@ -337,12 +441,31 @@ function Index() {
         </div>
       </div>
 
+      {started && !gameOver && (
+        <div className="pointer-events-none absolute bottom-4 left-1/2 flex -translate-x-1/2 gap-2 font-mono text-xs">
+          <PowerChip label="RAPID" color="#fbbf24" seconds={power.rapid / 60} />
+          <PowerChip label="SHIELD" color="#7dd3fc" seconds={power.shield / 60} />
+          <PowerChip label="TRIPLE" color="#a78bfa" seconds={power.triple / 60} />
+        </div>
+      )}
+
       {!started && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="max-w-md rounded-2xl border border-cyan-400/30 bg-black/60 p-8 text-center backdrop-blur">
             <h1 className="font-mono text-3xl font-bold tracking-widest text-cyan-300">STAR VOYAGER</h1>
             <p className="mt-3 text-sm text-white/70">
               Arrows / WASD to fly, Space to fire. On mobile, drag and tap.
+            </p>
+            <p className="mt-2 text-xs text-white/60">
+              Destroy enemies for power-ups: <span className="text-amber-300">R</span>apid fire,{" "}
+              <span className="text-sky-300">S</span>hield, <span className="text-violet-300">T</span>riple shot.
+            </p>
+            <p className="mt-3 text-xs text-white/60">
+              Play offline?{" "}
+              <a className="text-cyan-300 underline" href="/star-voyager.html" download>
+                Download standalone HTML
+              </a>
+              , then double-click to run on your PC.
             </p>
             <button
               onClick={restart}
@@ -369,5 +492,21 @@ function Index() {
         </div>
       )}
     </main>
+  );
+}
+
+function PowerChip({ label, color, seconds }: { label: string; color: string; seconds: number }) {
+  const active = seconds > 0;
+  return (
+    <div
+      className="rounded border bg-black/50 px-2.5 py-1 backdrop-blur transition"
+      style={{
+        borderColor: active ? color : "rgba(255,255,255,0.12)",
+        color: active ? color : "rgba(255,255,255,0.35)",
+        boxShadow: active ? `0 0 12px ${color}55` : undefined,
+      }}
+    >
+      {label} {active ? `${seconds.toFixed(1)}s` : "—"}
+    </div>
   );
 }
